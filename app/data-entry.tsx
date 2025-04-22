@@ -13,7 +13,7 @@ import {
 import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Animatable from "react-native-animatable";
-import { useRouter } from "expo-router";
+import { useRouter, useLocalSearchParams } from "expo-router";            
 import * as Location from "expo-location";
 
 const primaryColor = "#6C63FF";
@@ -29,16 +29,16 @@ interface CommonParams {
 
 interface StationMeasurement {
   frequency: number;
-  latitude: string;               // formatted to 6 decimals
-  longitude: string;              // formatted to 6 decimals
-  distance: number;               // calculated based on station and interstation value
-  txCurrent: string;              // entered value (A)
-  rxVoltage: string;              // entered value (mV)
-  calculatedResistivity: number;  // in Ω·m
+  latitude: string; // formatted to 6 decimals
+  longitude: string; // formatted to 6 decimals
+  distance: number; // calculated based on station and interstation value
+  txCurrent: string; // entered value (A)
+  rxVoltage: string; // entered value (mV)
+  calculatedResistivity: number; // in Ω·m
   calculatedConductivity: number; // in µS/cm
-  calculatedDepth: number;        // in m (negative indicates below ground)
-  date: string;                   // current date at time of saving
-  time: string;                   // current time at time of saving
+  calculatedDepth: number; // in m (negative indicates below ground)
+  date: string; // current date at time of saving
+  time: string; // current time at time of saving
 }
 
 interface ResultData {
@@ -50,6 +50,17 @@ interface ResultData {
 
 export default function DataEntryScreen() {
   const router = useRouter();
+  const params = useLocalSearchParams();
+
+  const isEditing = params.isEditing === "true";
+  const projectIndex = params.projectIndex
+    ? parseInt(
+        Array.isArray(params.projectIndex)
+          ? params.projectIndex[0]
+          : params.projectIndex,
+        10
+      )
+    : null;
 
   // step 0 = project setup, 1 = measurement entry.
   const [step, setStep] = useState(0);
@@ -69,19 +80,43 @@ export default function DataEntryScreen() {
     [freq: number]: { txCurrent: string; rxVoltage: string };
   }>({});
 
-  const [resultData, setResultData] = useState<ResultData>({
-    name: "",
-    common: {
-      transcat: "",
-      interstation: "",
-      averageResistivity: "",
-      intercoil: "",
-    },
-    stations: {},
-  });
-  
+  // In DataEntryScreen.tsx
+  const [resultData, setResultData] = useState<ResultData>(
+    isEditing && params.existingData
+      ? JSON.parse(
+          Array.isArray(params.existingData)
+            ? params.existingData[0]
+            : params.existingData
+        )
+      : {
+          name: "",
+          common: {
+            transcat: "",
+            interstation: "",
+            averageResistivity: "",
+            intercoil: "",
+          },
+          stations: {},
+        }
+  );
+
+  useEffect(() => {
+    if (isEditing) {
+      const station = parseInt(
+        Array.isArray(params.currentStation)
+          ? params.currentStation[0]
+          : params.currentStation,
+        10
+      );
+      if (!isNaN(station)) setCurrentStation(station);
+    }
+  }, [isEditing, params.currentStation]);
+
   // GPS coordinates state.
-  const [gps, setGps] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [gps, setGps] = useState<{
+    latitude: number;
+    longitude: number;
+  } | null>(null);
 
   // Request GPS location on mount.
   useEffect(() => {
@@ -101,6 +136,40 @@ export default function DataEntryScreen() {
       });
     })();
   }, []);
+
+  useEffect(() => {
+    const loadExistingData = async () => {
+      if (isEditing && params.existingData) {
+        const existingData: ResultData = JSON.parse(
+          Array.isArray(params.existingData)
+            ? params.existingData[0]
+            : params.existingData
+        );
+        setResultName(existingData.name);
+        setCommonParams(existingData.common);
+        setCurrentStation(
+          parseInt(
+            Array.isArray(params.currentStation)
+              ? params.currentStation[0]
+              : params.currentStation,
+            10
+          )
+        );
+        setResultData(existingData);
+        // Force step to 1 when editing existing project
+        setStep(1); // Add this line
+
+        if (params.transect) {
+          setCommonParams((prev) => ({
+            ...prev,
+            transcat: params.transect.toString(),
+          }));
+        }
+      }
+    };
+
+    loadExistingData();
+  }, [isEditing, params.existingData, params.currentStation, params.transect]);
 
   // Helper function to navigate back.
   const handleGoBack = () => {
@@ -133,15 +202,21 @@ export default function DataEntryScreen() {
     }
     const intercoilValue = parseFloat(commonParams.intercoil);
     if (isNaN(intercoilValue) || intercoilValue <= 0) {
-      Alert.alert("Invalid Data", "Please enter a valid intercoil spacing value.");
+      Alert.alert(
+        "Invalid Data",
+        "Please enter a valid intercoil spacing value."
+      );
       return;
     }
     const avgRes = parseFloat(commonParams.averageResistivity);
     if (isNaN(avgRes) || avgRes <= 0) {
-      Alert.alert("Invalid Data", "Please enter a valid average resistivity value.");
+      Alert.alert(
+        "Invalid Data",
+        "Please enter a valid average resistivity value."
+      );
       return;
     }
-    
+
     // Get current date and time
     const now = new Date();
     const dateStr = now.toLocaleDateString();
@@ -156,14 +231,18 @@ export default function DataEntryScreen() {
     const startingStation = transcatNumber * 100 + 1;
     const distanceInterval = parseFloat(commonParams.interstation);
     if (isNaN(distanceInterval) || distanceInterval < 0) {
-      Alert.alert("Invalid Interstation", "Please enter a valid interstation value.");
+      Alert.alert(
+        "Invalid Interstation",
+        "Please enter a valid interstation value."
+      );
       return;
     }
     // Compute distance: (currentStation - startingStation) * interstation
-    const stationDistance = (currentStation - startingStation) * distanceInterval;
+    const stationDistance =
+      (currentStation - startingStation) * distanceInterval;
 
     let stationData: StationMeasurement[] = [];
-    
+
     for (let freq of frequencyList) {
       const measurement = stationMeasurements[freq];
       if (!measurement || !measurement.txCurrent || !measurement.rxVoltage) {
@@ -176,7 +255,7 @@ export default function DataEntryScreen() {
 
       const txCurrent = parseFloat(measurement.txCurrent);
       const rxVoltage_mV = parseFloat(measurement.rxVoltage);
-      
+
       if (txCurrent === 0) {
         Alert.alert("Invalid Input", `Tx Current cannot be zero at ${freq} Hz`);
         return;
@@ -193,7 +272,8 @@ export default function DataEntryScreen() {
       const term2 = (0.00000232 * intercoilValue) / Math.pow(intercoilValue, 3);
       const numerator = term1 - term2;
       const conductivity =
-        (numerator / 0.0000039478 * freq * Math.pow(intercoilValue, 2)) / 100000000;
+        ((numerator / 0.0000039478) * freq * Math.pow(intercoilValue, 2)) /
+        100000000;
 
       // 3. Calculate Resistivity - Excel column L
       const resistivity = (1 / conductivity) * 10000;
@@ -204,8 +284,8 @@ export default function DataEntryScreen() {
       // Include new parameters in the measurement record.
       stationData.push({
         frequency: freq,
-        latitude: gps ? gps.latitude.toFixed(6) : "0.000000",
-        longitude: gps ? gps.longitude.toFixed(6) : "0.000000",
+        latitude: resultData.gps?.latitude.toFixed(6) || "0.000000",
+        longitude: resultData.gps?.longitude.toFixed(6) || "0.000000",
         distance: stationDistance,
         calculatedDepth: depth,
         txCurrent: measurement.txCurrent,
@@ -221,7 +301,7 @@ export default function DataEntryScreen() {
     updatedStations[currentStation] = stationData;
     setResultData({ ...resultData, stations: updatedStations });
     setStationMeasurements({});
-    setCurrentStation(currentStation + 1);
+    setCurrentStation(prev => prev + 1); // Always increment station number by 1
     Alert.alert("Station Saved", `Station ${currentStation} data saved.`);
   };
 
@@ -256,7 +336,18 @@ export default function DataEntryScreen() {
     }
     const storedResults = await AsyncStorage.getItem("results");
     let resultsArray = storedResults ? JSON.parse(storedResults) : [];
-    resultsArray.push(finalData);
+
+    // Update existing project if editing
+    // In saveResult function
+    // Update the validation check:
+    if (
+      isEditing &&
+      projectIndex !== null &&
+      !isNaN(projectIndex) && // Add this check
+      projectIndex < resultsArray.length
+    ) {
+      resultsArray[projectIndex] = finalData;
+    }
     await AsyncStorage.setItem("results", JSON.stringify(resultsArray));
     Alert.alert("Success", "Result saved successfully");
     handleGoBack();
@@ -266,9 +357,9 @@ export default function DataEntryScreen() {
     <ScrollView style={styles.container}>
       {/* Top Navigation Bar */}
       <View style={styles.navbar}>
-        <Image 
-          source={require("../assets/images/icon.png")} 
-          style={styles.logo} 
+        <Image
+          source={require("../assets/images/icon.png")}
+          style={styles.logo}
         />
         <Text style={styles.navTitle}>Lambda EM</Text>
       </View>
@@ -276,7 +367,7 @@ export default function DataEntryScreen() {
       <TouchableOpacity style={styles.backButton} onPress={handleGoBack}>
         <Ionicons name="arrow-back" size={24} color={primaryColor} />
       </TouchableOpacity>
-      
+
       {step === 0 && (
         <Animatable.View animation="fadeInLeft" duration={600}>
           <Text style={styles.sectionTitle}>Project Setup</Text>
@@ -360,7 +451,7 @@ export default function DataEntryScreen() {
           </View>
         </Animatable.View>
       )}
-      
+
       {step === 1 && (
         <Animatable.View animation="fadeInRight" duration={600}>
           <Text style={styles.sectionTitle}>
@@ -378,14 +469,18 @@ export default function DataEntryScreen() {
                   placeholder="Tx Current (A)"
                   keyboardType="numeric"
                   value={stationMeasurements[freq]?.txCurrent || ""}
-                  onChangeText={(text) => updateMeasurement(freq, "txCurrent", text)}
+                  onChangeText={(text) =>
+                    updateMeasurement(freq, "txCurrent", text)
+                  }
                 />
                 <TextInput
                   style={styles.measurementInput}
                   placeholder="Rx Voltage (mV)"
                   keyboardType="numeric"
                   value={stationMeasurements[freq]?.rxVoltage || ""}
-                  onChangeText={(text) => updateMeasurement(freq, "rxVoltage", text)}
+                  onChangeText={(text) =>
+                    updateMeasurement(freq, "rxVoltage", text)
+                  }
                 />
               </View>
             ))}
@@ -419,7 +514,11 @@ const styles = StyleSheet.create({
     marginBottom: 20,
   },
   logo: { width: 40, height: 40, resizeMode: "contain" },
-  navTitle: { fontFamily: "JosefinSans_600SemiBold", fontSize: 20, color: primaryColor },
+  navTitle: {
+    fontFamily: "JosefinSans_600SemiBold",
+    fontSize: 20,
+    color: primaryColor,
+  },
   backButton: { padding: 10, alignSelf: "flex-start" },
   sectionTitle: {
     fontFamily: "JosefinSans_600SemiBold",

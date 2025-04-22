@@ -1,5 +1,7 @@
-// app/detail-data.jsx
-import React, { useEffect, useState, useCallback } from "react";
+import "react-native-get-random-values";
+import { Buffer } from "buffer";
+import * as MediaLibrary from "expo-media-library";
+import React, { useState, useCallback } from "react";
 import {
   ScrollView,
   View,
@@ -9,13 +11,14 @@ import {
   ActivityIndicator,
   Image,
   Alert,
+  Modal,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useRouter, useLocalSearchParams, useFocusEffect } from "expo-router";
 
-// Import for Excel export
-import * as XLSX from "xlsx";
+// Import ExcelJS, Expo FileSystem and Expo Sharing for the export functionality.
+import ExcelJS from "exceljs";
 import * as FileSystem from "expo-file-system";
 import * as Sharing from "expo-sharing";
 
@@ -30,16 +33,16 @@ interface CommonParams {
 
 interface StationMeasurement {
   frequency: number;
-  latitude: string;               // added latitude (6 decimals)
-  longitude: string;              // added longitude (6 decimals)
-  distance: number;               // station distance (m)
-  txCurrent: string;              // Tx Current (A)
-  rxVoltage: string;              // Rx Voltage (mV)
-  calculatedDepth: number;        // Depth (m)
-  calculatedConductivity: number; // Conductivity (µS/cm)
-  calculatedResistivity: number;  // Resistivity (Ω·m)
-  date: string;                   // Date of measurement
-  time: string;                   // Time of measurement
+  latitude: string;
+  longitude: string;
+  distance: number;
+  txCurrent: string;
+  rxVoltage: string;
+  calculatedDepth: number;
+  calculatedConductivity: number;
+  calculatedResistivity: number;
+  date: string;
+  time: string;
 }
 
 interface ResultData {
@@ -54,8 +57,8 @@ export default function DetailDataScreen() {
   const router = useRouter();
   const [result, setResult] = useState<ResultData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [showActionModal, setShowActionModal] = useState(false);
 
-  // Loads the stored result by index.
   const loadResult = async () => {
     try {
       const storedResults = await AsyncStorage.getItem("results");
@@ -77,74 +80,268 @@ export default function DetailDataScreen() {
     }, [index])
   );
 
-  // Function to export the result data to an Excel file.
+
+  const params = useLocalSearchParams();
+
+  // Next Station
+  // In DetailDataScreen.tsx
+const handleNextStation = () => {
+  if (!result) return;
+
+  // Get current stations and determine next station number
+  const stationNumbers = Object.keys(result.stations)
+    .map(Number)
+    .filter(n => !isNaN(n));
+  
+  if (stationNumbers.length === 0) return;
+
+  const lastStation = Math.max(...stationNumbers);
+  const nextStation = lastStation + 1;
+
+  router.push({
+    pathname: "/data-entry",
+    params: {
+      isEditing: "true",
+      projectIndex: Array.isArray(index) ? index[0] : index || "",
+      existingData: JSON.stringify(result),
+      currentStation: nextStation.toString(),
+    },
+  });
+};
+
+const handleNewTransect = () => {
+  if (!result) return;
+
+  // Create new transect while preserving project name
+  const currentTransect = parseInt(result.common.transcat, 10);
+  const newTransect = currentTransect + 1;
+  const startingStation = newTransect * 100 + 1;
+
+  router.push({
+    pathname: "/data-entry",
+    params: {
+      isEditing: "true",
+      projectIndex: Array.isArray(index) ? index[0] : index || "",
+      existingData: JSON.stringify({
+        ...result,
+        common: {
+          ...result.common,
+          transcat: newTransect.toString()
+        }
+      }),
+      currentStation: startingStation.toString(),
+    },
+  });
+};
+  const handleBack = () => {
+    // Optionally check if the router can go back
+    // If not, push to a default screen (like the index/home screen)
+    if (router.back) {
+      router.back();
+    } else {
+      router.push("/"); // Adjust this route as needed.
+    }
+  };
+
   const exportToExcel = async () => {
     if (!result) {
       Alert.alert("No data", "There is no result data to export.");
       return;
     }
 
+    const { status } = await MediaLibrary.requestPermissionsAsync();
+    if (status !== "granted") {
+      Alert.alert(
+        "Permission Needed",
+        "Permission to access media library is required to save the file."
+      );
+      return;
+    }
+
     try {
-      // Flatten the data: create an array of objects (rows)
-      const exportData: any[] = [];
-      // Header columns: adjust as needed.
-      // For each station, include a row per measurement.
+      const workbook = new ExcelJS.Workbook();
+      workbook.creator = "Lambda EM";
+      workbook.created = new Date();
+      const worksheet = workbook.addWorksheet("Measurements");
+
+      // Title Row
+      worksheet.mergeCells("A1:L1");
+      const titleCell = worksheet.getCell("A1");
+      titleCell.value = `${result.name.toUpperCase()} ELECTROMAGNETIC SURVEY DATA`;
+      titleCell.font = {
+        name: "Times New Roman",
+        bold: true,
+        size: 18,
+        color: { argb: "FFFFFFFF" },
+      };
+      titleCell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FF6C63FF" },
+      };
+      titleCell.alignment = { vertical: "middle", horizontal: "center" };
+      titleCell.border = {
+        top: { style: "medium", color: { argb: "FF000000" } },
+        bottom: { style: "medium", color: { argb: "FF000000" } },
+      };
+
+      // Common Parameters Section
+      const commonParams = [
+        { label: "Interstation", value: `${result.common.interstation} m` },
+        {
+          label: "Average Resistivity",
+          value: `${result.common.averageResistivity} Ω·m`,
+        },
+        { label: "Intercoil", value: `${result.common.intercoil} m` },
+      ];
+
+      commonParams.forEach((param, index) => {
+        const startCol = index * 4 + 1;
+        worksheet.mergeCells(2, startCol, 2, startCol + 3);
+
+        const cell = worksheet.getCell(2, startCol);
+        cell.value = `${param.label}: ${param.value}`;
+        cell.font = {
+          name: "Times New Roman",
+          bold: true,
+          italic: true,
+          size: 12,
+          color: { argb: "FF2D3436" },
+        };
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FFE6E6FA" },
+        };
+        cell.alignment = { vertical: "middle", horizontal: "center" };
+        cell.border = {
+          top: { style: "thin", color: { argb: "FF6C63FF" } },
+          bottom: { style: "thin", color: { argb: "FF6C63FF" } },
+          left: { style: "thin", color: { argb: "FF6C63FF" } },
+          right: { style: "thin", color: { argb: "FF6C63FF" } },
+        };
+      });
+
+      // Header Row
+      const headers = [
+        "Station",
+        "Freq (Hz)",
+        "Latitude",
+        "Longitude",
+        "Distance (m)",
+        "Depth (m)",
+        "Tx (A)",
+        "Rx (mV)",
+        "Cond (µS/cm)",
+        "Resist (Ω·m)",
+        "Date",
+        "Time",
+      ];
+
+      const headerRow = worksheet.addRow(headers);
+      headerRow.eachCell((cell) => {
+        cell.font = {
+          name: "Times New Roman",
+          bold: true,
+          size: 12,
+          color: { argb: "FFFFFFFF" },
+        };
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FF4B4D7E" },
+        };
+        cell.alignment = { vertical: "middle", horizontal: "center" };
+        cell.border = {
+          top: { style: "thin", color: { argb: "FF6C63FF" } },
+          bottom: { style: "thin", color: { argb: "FF6C63FF" } },
+          left: { style: "thin", color: { argb: "FF6C63FF" } },
+          right: { style: "thin", color: { argb: "FF6C63FF" } },
+        };
+      });
+      headerRow.height = 25;
+
+      // Data Rows
       Object.keys(result.stations).forEach((stationKey) => {
-        const measurements = result.stations[stationKey];
-        measurements.forEach((m) => {
-          exportData.push({
-            "Result Name": result.name,
-            Transcat: result.common.transcat,
-            "Interstation (m)": result.common.interstation,
-            "Avg Resistivity (Ω·m)": result.common.averageResistivity,
-            "Intercoil (m)": result.common.intercoil,
-            GPS: result.gps
-              ? `${result.gps.latitude.toFixed(6)}, ${result.gps.longitude.toFixed(6)}`
-              : "",
-            Station: stationKey,
-            "Frequency (Hz)": m.frequency,
-            Latitude: parseFloat(m.latitude).toFixed(6),
-            Longitude: parseFloat(m.longitude).toFixed(6),
-            "Distance (m)": m.distance,
-            "Depth (m)": m.calculatedDepth.toFixed(3),
-            "Tx (A)": m.txCurrent,
-            "Rx (mV)": m.rxVoltage,
-            "Conductivity (µS/cm)": m.calculatedConductivity.toFixed(3),
-            "Resistivity (Ω·m)": m.calculatedResistivity.toFixed(3),
-            Date: m.date,
-            Time: m.time,
+        result.stations[stationKey].forEach((m) => {
+          const row = worksheet.addRow([
+            stationKey,
+            m.frequency,
+            parseFloat(m.latitude).toFixed(6),
+            parseFloat(m.longitude).toFixed(6),
+            m.distance.toFixed(2),
+            m.calculatedDepth.toFixed(2),
+            parseFloat(m.txCurrent).toFixed(3),
+            parseFloat(m.rxVoltage).toFixed(3),
+            m.calculatedConductivity.toFixed(2),
+            m.calculatedResistivity.toFixed(2),
+            m.date,
+            m.time,
+          ]);
+
+          row.eachCell((cell) => {
+            cell.font = {
+              name: "Times New Roman",
+              size: 11,
+              color: { argb: "FF444444" },
+            };
+            cell.alignment = { vertical: "middle", horizontal: "center" };
+            cell.border = {
+              bottom: { style: "hair", color: { argb: "FFEEEEEE" } },
+              left: { style: "hair", color: { argb: "FFEEEEEE" } },
+              right: { style: "hair", color: { argb: "FFEEEEEE" } },
+            };
           });
         });
       });
 
-      // Create a worksheet from the JSON data.
-      const ws = XLSX.utils.json_to_sheet(exportData);
-      // Create a new workbook and append the worksheet.
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, "ResultData");
+      // Column Formatting
+      worksheet.columns.forEach((column, index) => {
+        column.width = index === 0 ? 12 : 14;
+        if ([1, 4, 5, 8, 9].includes(index)) {
+          column.numFmt = "0.00";
+        }
+      });
 
-      // Write the workbook to a binary string in base64 format.
-      const wbout = XLSX.write(wb, { bookType: "xlsx", type: "base64" });
+      // Alternating Row Colors
+      worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
+        if (rowNumber > 3) {
+          row.eachCell((cell) => {
+            cell.fill = {
+              type: "pattern",
+              pattern: "solid",
+              fgColor: { argb: rowNumber % 2 === 0 ? "FFF8F8F8" : "FFFFFFFF" },
+            };
+          });
+        }
+      });
 
-      // Define the file path in the app's document directory.
-      const uri = FileSystem.documentDirectory + `${result.name.replace(/\s+/g, "_")}_data.xlsx`;
+      // Generate File
+      const buffer = await workbook.xlsx.writeBuffer();
+      const base64 = Buffer.from(buffer).toString("base64");
+      const fileName = `${result.name.replace(/\s+/g, "_")}_survey_data.xlsx`;
+      const uri = FileSystem.documentDirectory + fileName;
 
-      // Write the file to disk.
-      await FileSystem.writeAsStringAsync(uri, wbout, {
+      await FileSystem.writeAsStringAsync(uri, base64, {
         encoding: FileSystem.EncodingType.Base64,
       });
 
-      Alert.alert("Export Successful", "Excel file has been generated.");
+      Alert.alert("Success", "Excel file generated successfully!");
 
-      // Open share dialog to allow user to share the file.
       if (await Sharing.isAvailableAsync()) {
         await Sharing.shareAsync(uri);
       } else {
-        Alert.alert("Sharing not available", "Your device does not support file sharing.");
+        Alert.alert(
+          "Sharing Unavailable",
+          "File saved to app directory: " + uri
+        );
       }
-    } catch (e) {
-      console.error(e);
-      Alert.alert("Export Failed", "An error occurred while exporting the data.");
+    } catch (error) {
+      console.error("Export error:", error);
+      Alert.alert(
+        "Export Failed",
+        "An error occurred while generating the file. Please try again."
+      );
     }
   };
 
@@ -160,7 +357,10 @@ export default function DetailDataScreen() {
     return (
       <View style={styles.errorContainer}>
         <Text style={styles.errorText}>Result not found.</Text>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backBtnContainer}>
+        <TouchableOpacity
+          onPress={() => router.back()}
+          style={styles.backBtnContainer}
+        >
           <Ionicons name="arrow-back" size={24} color={primaryColor} />
           <Text style={styles.backText}>Go Back</Text>
         </TouchableOpacity>
@@ -168,8 +368,6 @@ export default function DetailDataScreen() {
     );
   }
 
-  // Render the table header with the new order:
-  // Frequency, Latitude, Longitude, Distance, Depth, Tx, Rx, Conductivity, Resistivity, Date, Time.
   const renderMeasurementTableHeader = () => (
     <View style={[styles.tableRow, styles.tableHeader]}>
       <Text style={[styles.tableCell, styles.headerText]}>Freq (Hz)</Text>
@@ -186,7 +384,6 @@ export default function DetailDataScreen() {
     </View>
   );
 
-  // Render each measurement row in the order established above.
   const renderMeasurementRow = (m: StationMeasurement, idx: number) => (
     <View key={idx} style={styles.tableRow}>
       <Text style={styles.tableCell}>{m.frequency}</Text>
@@ -196,7 +393,9 @@ export default function DetailDataScreen() {
       <Text style={styles.tableCell}>{m.calculatedDepth.toFixed(3)}</Text>
       <Text style={styles.tableCell}>{m.txCurrent}</Text>
       <Text style={styles.tableCell}>{m.rxVoltage}</Text>
-      <Text style={styles.tableCell}>{m.calculatedConductivity.toFixed(3)}</Text>
+      <Text style={styles.tableCell}>
+        {m.calculatedConductivity.toFixed(3)}
+      </Text>
       <Text style={styles.tableCell}>{m.calculatedResistivity.toFixed(3)}</Text>
       <Text style={styles.tableCell}>{m.date}</Text>
       <Text style={styles.tableCell}>{m.time}</Text>
@@ -205,31 +404,39 @@ export default function DetailDataScreen() {
 
   return (
     <ScrollView style={styles.container}>
-      {/* Top Navigation Bar */}
       <View style={styles.navbar}>
-        <Image 
+        <Image
           source={require("../assets/images/icon.png")}
           style={styles.logo}
         />
         <Text style={styles.navTitle}>Lambda EM</Text>
       </View>
 
-      <TouchableOpacity style={styles.backBtnContainer} onPress={() => router.back()}>
+      <TouchableOpacity
+        style={styles.backBtnContainer}
+        onPress={() => handleBack()}
+      >
         <Ionicons name="arrow-back" size={24} color={primaryColor} />
         <Text style={styles.backText}>Back</Text>
       </TouchableOpacity>
 
       <Text style={styles.title}>{result.name}</Text>
-      
-      {/* Export Button */}
+
       <TouchableOpacity style={styles.exportButton} onPress={exportToExcel}>
         <Text style={styles.exportText}>Export as Excel</Text>
+      </TouchableOpacity>
+
+      <TouchableOpacity
+        style={styles.continueButton}
+        onPress={() => setShowActionModal(true)}
+      >
+        <Text style={styles.exportText}>Continue with Data Entry</Text>
       </TouchableOpacity>
 
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Common Parameters</Text>
         <View style={styles.paramRow}>
-          <Text style={styles.paramLabel}>Transcat:</Text>
+          <Text style={styles.paramLabel}>Transcect:</Text>
           <Text style={styles.paramValue}>{result.common.transcat}</Text>
         </View>
         <View style={styles.paramRow}>
@@ -238,7 +445,9 @@ export default function DetailDataScreen() {
         </View>
         <View style={styles.paramRow}>
           <Text style={styles.paramLabel}>Avg Resistivity (Ω·m):</Text>
-          <Text style={styles.paramValue}>{result.common.averageResistivity}</Text>
+          <Text style={styles.paramValue}>
+            {result.common.averageResistivity}
+          </Text>
         </View>
         <View style={styles.paramRow}>
           <Text style={styles.paramLabel}>Intercoil (m):</Text>
@@ -248,7 +457,8 @@ export default function DetailDataScreen() {
           <View style={styles.paramRow}>
             <Text style={styles.paramLabel}>GPS:</Text>
             <Text style={styles.paramValue}>
-              {result.gps.latitude.toFixed(6)}, {result.gps.longitude.toFixed(6)}
+              {result.gps.latitude.toFixed(6)},{" "}
+              {result.gps.longitude.toFixed(6)}
             </Text>
           </View>
         )}
@@ -270,6 +480,42 @@ export default function DetailDataScreen() {
           </View>
         ))}
       </View>
+      <Modal
+        visible={showActionModal}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={() => setShowActionModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Continue Data Entry</Text>
+            <TouchableOpacity
+              style={styles.modalOption}
+              onPress={() => {
+                setShowActionModal(false);
+                handleNextStation();
+              }}
+            >
+              <Text style={styles.modalOptionText}>Next Station</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.modalOption}
+              onPress={() => {
+                setShowActionModal(false);
+                handleNewTransect();
+              }}
+            >
+              <Text style={styles.modalOptionText}>New Transect</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.modalCancel}
+              onPress={() => setShowActionModal(false)}
+            >
+              <Text style={styles.modalCancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
   );
 }
@@ -368,9 +614,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     paddingHorizontal: 5,
   },
-  tableHeader: {
-    backgroundColor: "#f2f2f2",
-  },
+  tableHeader: { backgroundColor: "#f2f2f2" },
   tableCell: {
     flex: 1,
     fontFamily: "JosefinSans_400Regular",
@@ -399,6 +643,54 @@ const styles = StyleSheet.create({
     fontSize: 18,
     color: "#cc0000",
     marginBottom: 20,
+  },
+  continueButton: {
+    backgroundColor: primaryColor,
+    paddingVertical: 10,
+    paddingHorizontal: 15,
+    borderRadius: 8,
+    marginBottom: 20,
+    alignSelf: "center",
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.5)",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  modalContent: {
+    backgroundColor: "white",
+    borderRadius: 10,
+    padding: 20,
+    width: "80%",
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontFamily: "JosefinSans_600SemiBold",
+    marginBottom: 15,
+    textAlign: "center",
+    color: "#2d3436",
+  },
+  modalOption: {
+    padding: 15,
+    borderBottomWidth: 1,
+    borderColor: "#eee",
+  },
+  modalOptionText: {
+    fontSize: 16,
+    fontFamily: "JosefinSans_600SemiBold",
+    color: primaryColor,
+    textAlign: "center",
+  },
+  modalCancel: {
+    padding: 15,
+    marginTop: 10,
+  },
+  modalCancelText: {
+    fontSize: 16,
+    fontFamily: "JosefinSans_600SemiBold",
+    color: "#666",
+    textAlign: "center",
   },
 });
 
