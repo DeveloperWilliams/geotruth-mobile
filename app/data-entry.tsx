@@ -8,42 +8,41 @@ import {
   TouchableOpacity,
   Alert,
   StyleSheet,
-  Image,
+  ActivityIndicator,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Animatable from "react-native-animatable";
-import { useRouter, useLocalSearchParams } from "expo-router";            
+import { useRouter, useLocalSearchParams } from "expo-router";
 import * as Location from "expo-location";
+import { Audio } from "expo-av";
 
+const beepSound = require("../assets/beep.mp3");
 const primaryColor = "#6C63FF";
-// Frequencies arranged in descending order
 const frequencyList = [813, 559, 407, 254, 203, 153, 102];
-
-interface CommonParams {
-  transcat: string;
-  interstation: string;
-  averageResistivity: string;
-  intercoil: string;
-}
 
 interface StationMeasurement {
   frequency: number;
-  latitude: string; // formatted to 6 decimals
-  longitude: string; // formatted to 6 decimals
-  distance: number; // calculated based on station and interstation value
-  txCurrent: string; // entered value (A)
-  rxVoltage: string; // entered value (mV)
-  calculatedResistivity: number; // in Ω·m
-  calculatedConductivity: number; // in µS/cm
-  calculatedDepth: number; // in m (negative indicates below ground)
-  date: string; // current date at time of saving
-  time: string; // current time at time of saving
+  txCurrent: string;
+  rxVoltage: string;
+  latitude: string;
+  longitude: string;
+  distance: number;
+  calculatedDepth: number;
+  calculatedConductivity: number;
+  calculatedResistivity: number;
+  date: string;
+  time: string;
 }
 
 interface ResultData {
   name: string;
-  common: CommonParams;
+  common: {
+    transcat: string;
+    interstation: string;
+    averageResistivity: string;
+    intercoil: string;
+  };
   stations: { [key: number]: StationMeasurement[] };
   gps?: { latitude: number; longitude: number };
 }
@@ -51,453 +50,315 @@ interface ResultData {
 export default function DataEntryScreen() {
   const router = useRouter();
   const params = useLocalSearchParams();
-
   const isEditing = params.isEditing === "true";
-  const projectIndex = params.projectIndex
-    ? parseInt(
-        Array.isArray(params.projectIndex)
-          ? params.projectIndex[0]
-          : params.projectIndex,
-        10
-      )
-    : null;
+  const projectIndex = params.projectIndex ? parseInt(params.projectIndex as string, 10) : null;
 
-  // step 0 = project setup, 1 = measurement entry.
+  // State management
   const [step, setStep] = useState(0);
   const [resultName, setResultName] = useState("");
-  const [commonParams, setCommonParams] = useState<CommonParams>({
+  const [commonParams, setCommonParams] = useState({
     transcat: "",
     interstation: "",
     averageResistivity: "",
     intercoil: "",
   });
-  // Current station number will be set based on transcat (e.g. transcat 1 → 101).
-  const [currentStation, setCurrentStation] = useState<number>(0);
-
-  // Store measurement inputs per frequency for the current station.
-  // The keys are frequencies.
+  const [currentStation, setCurrentStation] = useState(0);
+  const [currentFrequencyIndex, setCurrentFrequencyIndex] = useState(0);
   const [stationMeasurements, setStationMeasurements] = useState<{
-    [freq: number]: { txCurrent: string; rxVoltage: string };
+    [freq: number]: StationMeasurement;
   }>({});
+  const [resultData, setResultData] = useState<ResultData>({
+    name: "",
+    common: { transcat: "", interstation: "", averageResistivity: "", intercoil: "" },
+    stations: {},
+  });
+  const [sensorStatus, setSensorStatus] = useState<"idle" | "loading" | "error">("idle");
+  const [gps, setGps] = useState<{ latitude: number; longitude: number } | null>(null);
 
-  // In DataEntryScreen.tsx
-  const [resultData, setResultData] = useState<ResultData>(
-    isEditing && params.existingData
-      ? JSON.parse(
-          Array.isArray(params.existingData)
-            ? params.existingData[0]
-            : params.existingData
-        )
-      : {
-          name: "",
-          common: {
-            transcat: "",
-            interstation: "",
-            averageResistivity: "",
-            intercoil: "",
-          },
-          stations: {},
-        }
-  );
-
-  useEffect(() => {
-    if (isEditing) {
-      const station = parseInt(
-        Array.isArray(params.currentStation)
-          ? params.currentStation[0]
-          : params.currentStation,
-        10
-      );
-      if (!isNaN(station)) setCurrentStation(station);
-    }
-  }, [isEditing, params.currentStation]);
-
-  // GPS coordinates state.
-  const [gps, setGps] = useState<{
-    latitude: number;
-    longitude: number;
-  } | null>(null);
-
-  // Request GPS location on mount.
-  useEffect(() => {
-    (async () => {
-      let { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== "granted") {
-        Alert.alert(
-          "Permission Denied",
-          "Location permission is required to capture GPS coordinates."
-        );
-        return;
-      }
-      let location = await Location.getCurrentPositionAsync({});
-      setGps({
-        latitude: location.coords.latitude,
-        longitude: location.coords.longitude,
-      });
-    })();
-  }, []);
-
+  // Load existing data for editing
   useEffect(() => {
     const loadExistingData = async () => {
       if (isEditing && params.existingData) {
-        const existingData: ResultData = JSON.parse(
-          Array.isArray(params.existingData)
-            ? params.existingData[0]
-            : params.existingData
-        );
+        const existingData: ResultData = JSON.parse(params.existingData as string);
         setResultName(existingData.name);
         setCommonParams(existingData.common);
-        setCurrentStation(
-          parseInt(
-            Array.isArray(params.currentStation)
-              ? params.currentStation[0]
-              : params.currentStation,
-            10
-          )
-        );
         setResultData(existingData);
-        // Force step to 1 when editing existing project
-        setStep(1); // Add this line
-
-        if (params.transect) {
-          setCommonParams((prev) => ({
-            ...prev,
-            transcat: params.transect.toString(),
-          }));
-        }
+        setCurrentStation(parseInt(params.currentStation as string, 10));
+        setStep(1);
       }
     };
-
     loadExistingData();
-  }, [isEditing, params.existingData, params.currentStation, params.transect]);
+  }, [isEditing, params.existingData, params.currentStation]);
 
-  // Helper function to navigate back.
-  const handleGoBack = () => {
-    router.back();
-  };
+  // Initialize GPS
+  useEffect(() => {
+    (async () => {
+      let { status } = await Location.requestForegroundPermissionsAsync();
+      if (status === "granted") {
+        const location = await Location.getCurrentPositionAsync({});
+        setGps(location.coords);
+      }
+    })();
+  }, []);
 
-  // Handler for updating a measurement for a given frequency.
-  const updateMeasurement = (
-    frequency: number,
-    field: "txCurrent" | "rxVoltage",
-    value: string
-  ) => {
-    setStationMeasurements((prev) => ({
-      ...prev,
-      [frequency]: {
-        ...prev[frequency],
-        [field]: value,
-      },
-    }));
-  };
-
-  // When the user saves a station’s data, calculate parameters and attach extra fields.
-  const saveStationMeasurements = () => {
-    if (!commonParams.intercoil) {
-      Alert.alert(
-        "Missing Data",
-        "Intercoil spacing is required (set in project setup)."
-      );
-      return;
-    }
+  const calculateMeasurements = (freq: number, txCurrent: string, rxVoltage: string) => {
     const intercoilValue = parseFloat(commonParams.intercoil);
-    if (isNaN(intercoilValue) || intercoilValue <= 0) {
-      Alert.alert(
-        "Invalid Data",
-        "Please enter a valid intercoil spacing value."
-      );
-      return;
-    }
     const avgRes = parseFloat(commonParams.averageResistivity);
-    if (isNaN(avgRes) || avgRes <= 0) {
-      Alert.alert(
-        "Invalid Data",
-        "Please enter a valid average resistivity value."
-      );
-      return;
-    }
+    const rxVoltage_mV = parseFloat(rxVoltage);
+    const txCurrent_A = parseFloat(txCurrent);
 
-    // Get current date and time
-    const now = new Date();
-    const dateStr = now.toLocaleDateString();
-    const timeStr = now.toLocaleTimeString();
+    const rxVoltage_V = rxVoltage_mV / 1000;
+    const ht = (100 * rxVoltage_V) / (4 * intercoilValue);
+    const term1 = 2 * ht;
+    const term2 = (0.00000232 * intercoilValue) / Math.pow(intercoilValue, 3);
+    const numerator = term1 - term2;
+    const conductivity = ((numerator / 0.0000039478) * freq * Math.pow(intercoilValue, 2)) / 100000000;
+    const resistivity = (1 / conductivity) * 10000;
+    const depth = -(503 / 5) * Math.sqrt(avgRes / freq);
 
-    // Calculate starting station based on transcat.
-    const transcatNumber = parseInt(commonParams.transcat, 10);
-    if (isNaN(transcatNumber)) {
-      Alert.alert("Invalid Transcat", "Transcat must be a numeric value.");
-      return;
-    }
-    const startingStation = transcatNumber * 100 + 1;
-    const distanceInterval = parseFloat(commonParams.interstation);
-    if (isNaN(distanceInterval) || distanceInterval < 0) {
-      Alert.alert(
-        "Invalid Interstation",
-        "Please enter a valid interstation value."
-      );
-      return;
-    }
-    // Compute distance: (currentStation - startingStation) * interstation
-    const stationDistance =
-      (currentStation - startingStation) * distanceInterval;
-
-    let stationData: StationMeasurement[] = [];
-
-    for (let freq of frequencyList) {
-      const measurement = stationMeasurements[freq];
-      if (!measurement || !measurement.txCurrent || !measurement.rxVoltage) {
-        Alert.alert(
-          "Missing Data",
-          `Please fill Tx Current and Rx Voltage for ${freq} Hz`
-        );
-        return;
-      }
-
-      const txCurrent = parseFloat(measurement.txCurrent);
-      const rxVoltage_mV = parseFloat(measurement.rxVoltage);
-
-      if (txCurrent === 0) {
-        Alert.alert("Invalid Input", `Tx Current cannot be zero at ${freq} Hz`);
-        return;
-      }
-
-      // Convert Rx Voltage from mV to Volts
-      const rxVoltage_V = rxVoltage_mV / 1000;
-
-      // 1. Calculate Total Field (Ht) - Excel column J
-      const ht = (100 * rxVoltage_V) / (4 * intercoilValue);
-
-      // 2. Calculate Conductivity - Excel column K
-      const term1 = 2 * ht;
-      const term2 = (0.00000232 * intercoilValue) / Math.pow(intercoilValue, 3);
-      const numerator = term1 - term2;
-      const conductivity =
-        ((numerator / 0.0000039478) * freq * Math.pow(intercoilValue, 2)) /
-        100000000;
-
-      // 3. Calculate Resistivity - Excel column L
-      const resistivity = (1 / conductivity) * 10000;
-
-      // 4. Calculate Depth - Excel column G
-      const depth = -(503 / 5) * Math.sqrt(avgRes / freq);
-
-      // Include new parameters in the measurement record.
-      stationData.push({
-        frequency: freq,
-        latitude: resultData.gps?.latitude.toFixed(6) || "0.000000",
-        longitude: resultData.gps?.longitude.toFixed(6) || "0.000000",
-        distance: stationDistance,
-        calculatedDepth: depth,
-        txCurrent: measurement.txCurrent,
-        rxVoltage: measurement.rxVoltage,
-        calculatedConductivity: conductivity,
-        calculatedResistivity: resistivity,
-        date: dateStr,
-        time: timeStr,
-      });
-    }
-
-    const updatedStations = { ...resultData.stations };
-    updatedStations[currentStation] = stationData;
-    setResultData({ ...resultData, stations: updatedStations });
-    setStationMeasurements({});
-    setCurrentStation(prev => prev + 1); // Always increment station number by 1
-    Alert.alert("Station Saved", `Station ${currentStation} data saved.`);
+    return {
+      conductivity,
+      resistivity,
+      depth,
+      txCurrent: txCurrent_A.toFixed(2),
+      rxVoltage: rxVoltage_mV.toFixed(2),
+    };
   };
 
-  // Save the complete project.
-  const saveResult = async () => {
-    if (
-      !resultName ||
-      !commonParams.transcat ||
-      !commonParams.interstation ||
-      !commonParams.averageResistivity ||
-      !commonParams.intercoil
-    ) {
-      Alert.alert("Incomplete Data", "Please complete all setup fields");
-      return;
-    }
-    // Determine starting station number based on transcat (e.g., transcat 1 becomes 101).
-    const transcatNumber = parseInt(commonParams.transcat, 10);
-    if (isNaN(transcatNumber)) {
-      Alert.alert("Invalid Transcat", "Transcat must be a numeric value.");
-      return;
-    }
-    const startingStation = transcatNumber * 100 + 1;
-    // If no station has been added, assign the starting station.
-    let finalData = {
-      ...resultData,
-      name: resultName,
-      common: commonParams,
-      gps: gps || { latitude: 0, longitude: 0 },
-    };
-    if (Object.keys(finalData.stations).length === 0) {
-      finalData.stations[startingStation] = [];
-    }
-    const storedResults = await AsyncStorage.getItem("results");
-    let resultsArray = storedResults ? JSON.parse(storedResults) : [];
+  const handleFetchData = async () => {
+    setSensorStatus("loading");
+    try {
+      const response = await fetch("http://192.168.4.1/start");
+      const data = await response.json();
+      
+      const calculations = calculateMeasurements(
+        frequencyList[currentFrequencyIndex],
+        data.current.toFixed(2),
+        (data.voltage * 1000).toFixed(2)
+      );
 
-    // Update existing project if editing
-    // In saveResult function
-    // Update the validation check:
-    if (
-      isEditing &&
-      projectIndex !== null &&
-      !isNaN(projectIndex) && // Add this check
-      projectIndex < resultsArray.length
-    ) {
-      resultsArray[projectIndex] = finalData;
+      setStationMeasurements(prev => ({
+              ...prev,
+              [frequencyList[currentFrequencyIndex]]: {
+                frequency: frequencyList[currentFrequencyIndex],
+                txCurrent: calculations.txCurrent,
+                rxVoltage: calculations.rxVoltage,
+                latitude: gps?.latitude?.toFixed(6) || "0.000000",
+                longitude: gps?.longitude?.toFixed(6) || "0.000000",
+                distance: (currentStation - (parseInt(commonParams.transcat, 10) * 100 + 1)) *
+                  parseFloat(commonParams.interstation),
+                calculatedDepth: calculations.depth,
+                calculatedConductivity: calculations.conductivity,
+                calculatedResistivity: calculations.resistivity,
+                date: new Date().toLocaleDateString(),
+                time: new Date().toLocaleTimeString(),
+              },
+            }));
+
+      await (await Audio.Sound.createAsync(beepSound)).sound.playAsync();
+      setSensorStatus("idle");
+    } catch (error) {
+      setSensorStatus("error");
+      Alert.alert("Sensor Error", "Failed to fetch sensor data");
     }
-    await AsyncStorage.setItem("results", JSON.stringify(resultsArray));
-    Alert.alert("Success", "Result saved successfully");
-    handleGoBack();
+  };
+
+  const handleSaveStation = async () => {
+    const stationData = Object.values(stationMeasurements);
+    if (stationData.length !== frequencyList.length) {
+      Alert.alert("Incomplete Data", "Complete all frequencies before saving");
+      return;
+    }
+
+    const updatedData = {
+      ...resultData,
+      stations: { ...resultData.stations, [currentStation]: stationData },
+    };
+
+    try {
+      const storedResults = await AsyncStorage.getItem("results");
+      const results = storedResults ? JSON.parse(storedResults) : [];
+      
+      if (isEditing && typeof projectIndex === "number") {
+        results[projectIndex] = updatedData;
+      } else {
+        results.push(updatedData);
+      }
+
+      await AsyncStorage.setItem("results", JSON.stringify(results));
+      setCurrentStation(prev => prev + 1);
+      setCurrentFrequencyIndex(0);
+      setStationMeasurements({});
+      Alert.alert("Success", `Station ${currentStation} saved successfully`);
+    } catch (error) {
+      Alert.alert("Error", "Failed to save station data");
+    }
   };
 
   return (
-    <ScrollView style={styles.container}>
-      {/* Top Navigation Bar */}
-      <View style={styles.navbar}>
-        <Image
-          source={require("../assets/images/icon.png")}
-          style={styles.logo}
-        />
-        <Text style={styles.navTitle}>Lambda EM</Text>
+    <ScrollView contentContainerStyle={styles.container}>
+      {/* Header */}
+      <View style={styles.header}>
+        <TouchableOpacity onPress={() => router.back()}>
+          <Ionicons name="arrow-back" size={24} color={primaryColor} />
+        </TouchableOpacity>
+        <Text style={styles.headerTitle}>
+          {step === 0 ? "Project Setup" : `Station ${currentStation}`}
+        </Text>
+        <View style={{ width: 24 }} />
       </View>
 
-      <TouchableOpacity style={styles.backButton} onPress={handleGoBack}>
-        <Ionicons name="arrow-back" size={24} color={primaryColor} />
-      </TouchableOpacity>
+      {step === 0 ? (
+        <Animatable.View animation="fadeIn" style={styles.card}>
+          <Text style={styles.cardTitle}>Configure Project</Text>
 
-      {step === 0 && (
-        <Animatable.View animation="fadeInLeft" duration={600}>
-          <Text style={styles.sectionTitle}>Project Setup</Text>
-          <View style={styles.formCard}>
-            <Text style={styles.inputLabel}>Project Name</Text>
+          <View style={styles.inputGroup}>
+            <Text style={styles.label}>Project Name</Text>
             <TextInput
               style={styles.input}
-              placeholder="Enter project name"
               value={resultName}
               onChangeText={setResultName}
+              placeholder="Enter project name"
             />
-            {/* Transcat input */}
-            <Text style={styles.inputLabel}>Transect (numeric)</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="Enter transcat value"
-              value={commonParams.transcat}
-              keyboardType="numeric"
-              onChangeText={(text) =>
-                setCommonParams({ ...commonParams, transcat: text })
-              }
-            />
-            {/* Interstation input */}
-            <Text style={styles.inputLabel}>Interstation Spacing (m)</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="Enter interstation value"
-              value={commonParams.interstation}
-              keyboardType="numeric"
-              onChangeText={(text) =>
-                setCommonParams({ ...commonParams, interstation: text })
-              }
-            />
-            <Text style={styles.inputLabel}>Average Resistivity (Ω·m)</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="Enter average resistivity"
-              value={commonParams.averageResistivity}
-              keyboardType="numeric"
-              onChangeText={(text) =>
-                setCommonParams({ ...commonParams, averageResistivity: text })
-              }
-            />
-            <Text style={styles.inputLabel}>Intercoil Spacing (m)</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="Enter intercoil spacing"
-              value={commonParams.intercoil}
-              keyboardType="numeric"
-              onChangeText={(text) =>
-                setCommonParams({ ...commonParams, intercoil: text })
-              }
-            />
-            <TouchableOpacity
-              style={styles.primaryButton}
-              onPress={() => {
-                if (
-                  !resultName ||
-                  !commonParams.transcat ||
-                  !commonParams.interstation ||
-                  !commonParams.averageResistivity ||
-                  !commonParams.intercoil
-                ) {
-                  Alert.alert("Validation Error", "All fields are required");
-                  return;
-                }
-                // Set starting station number based on transcat (e.g. 1 becomes 101)
-                const transcatNumber = parseInt(commonParams.transcat, 10);
-                const startingStation = transcatNumber * 100 + 1;
-                setCurrentStation(startingStation);
-                setResultData({
-                  ...resultData,
-                  name: resultName,
-                  common: commonParams,
-                });
-                setStep(1);
-              }}
-            >
-              <Text style={styles.buttonText}>Proceed to Measurements</Text>
-            </TouchableOpacity>
           </View>
-        </Animatable.View>
-      )}
 
-      {step === 1 && (
-        <Animatable.View animation="fadeInRight" duration={600}>
-          <Text style={styles.sectionTitle}>
-            Station {currentStation} Measurements
-          </Text>
-          <View style={styles.formCard}>
-            {frequencyList.map((freq) => (
-              <View key={freq} style={styles.measurementRow}>
-                {/* The order of displayed fields: frequency, tx and rx inputs.
-                    The new fields (latitude, longitude, distance, date, time, depth,
-                    conductivity and resistivity) will be computed and stored – you may choose to display them elsewhere if needed. */}
-                <Text style={styles.frequencyLabel}>{freq} Hz</Text>
-                <TextInput
-                  style={styles.measurementInput}
-                  placeholder="Tx Current (A)"
-                  keyboardType="numeric"
-                  value={stationMeasurements[freq]?.txCurrent || ""}
-                  onChangeText={(text) =>
-                    updateMeasurement(freq, "txCurrent", text)
-                  }
-                />
-                <TextInput
-                  style={styles.measurementInput}
-                  placeholder="Rx Voltage (mV)"
-                  keyboardType="numeric"
-                  value={stationMeasurements[freq]?.rxVoltage || ""}
-                  onChangeText={(text) =>
-                    updateMeasurement(freq, "rxVoltage", text)
-                  }
-                />
+          <View style={styles.paramGrid}>
+            <View style={styles.paramItem}>
+              <Text style={styles.label}>Transect Number</Text>
+              <TextInput
+                style={styles.input}
+                keyboardType="number-pad"
+                value={commonParams.transcat}
+                onChangeText={t => setCommonParams(p => ({ ...p, transcat: t }))}
+              />
+            </View>
+
+            <View style={styles.paramItem}>
+              <Text style={styles.label}>Interstation (m)</Text>
+              <TextInput
+                style={styles.input}
+                keyboardType="decimal-pad"
+                value={commonParams.interstation}
+                onChangeText={t => setCommonParams(p => ({ ...p, interstation: t }))}
+              />
+            </View>
+
+            <View style={styles.paramItem}>
+              <Text style={styles.label}>Resistivity (Ω·m)</Text>
+              <TextInput
+                style={styles.input}
+                keyboardType="decimal-pad"
+                value={commonParams.averageResistivity}
+                onChangeText={t => setCommonParams(p => ({ ...p, averageResistivity: t }))}
+              />
+            </View>
+
+            <View style={styles.paramItem}>
+              <Text style={styles.label}>Intercoil (m)</Text>
+              <TextInput
+                style={styles.input}
+                keyboardType="decimal-pad"
+                value={commonParams.intercoil}
+                onChangeText={t => setCommonParams(p => ({ ...p, intercoil: t }))}
+              />
+            </View>
+          </View>
+
+          <TouchableOpacity
+            style={styles.primaryButton}
+            onPress={() => {
+              const isValid = Object.values(commonParams).every(v => !!v) && !!resultName;
+              if (isValid) {
+                const startStation = parseInt(commonParams.transcat, 10) * 100 + 1;
+                setCurrentStation(startStation);
+                setStep(1);
+              } else {
+                Alert.alert("Missing Fields", "Fill all required parameters");
+              }
+            }}
+          >
+            <Text style={styles.buttonText}>Initialize Project</Text>
+          </TouchableOpacity>
+        </Animatable.View>
+      ) : (
+        <Animatable.View animation="fadeIn" style={styles.card}>
+          <View style={styles.progressHeader}>
+            <Text style={styles.frequencyLabel}>
+              {frequencyList[currentFrequencyIndex]} Hz
+            </Text>
+            <Text style={styles.progressText}>
+              {currentFrequencyIndex + 1}/{frequencyList.length}
+            </Text>
+          </View>
+
+          <View style={styles.sensorContainer}>
+            <TouchableOpacity
+              style={[
+                styles.sensorButton,
+                sensorStatus === "loading" && styles.sensorLoading,
+                sensorStatus === "error" && styles.sensorError
+              ]}
+              onPress={handleFetchData}
+              disabled={sensorStatus === "loading"}
+            >
+              {sensorStatus === "loading" ? (
+                <ActivityIndicator color="#FFF" />
+              ) : (
+                <>
+                  <Ionicons
+                    name={sensorStatus === "error" ? "alert-circle" : "radio"}
+                    size={32}
+                    color="#FFF"
+                  />
+                  <Text style={styles.sensorButtonText}>
+                    {sensorStatus === "error" ? "Retry Connection" : "Acquire Data"}
+                  </Text>
+                </>
+              )}
+            </TouchableOpacity>
+
+            <View style={styles.dataDisplay}>
+              <View style={styles.dataItem}>
+                <Text style={styles.dataLabel}>Tx Current (A)</Text>
+                <Text style={styles.dataValue}>
+                  {stationMeasurements[frequencyList[currentFrequencyIndex]]?.txCurrent || "--"}
+                </Text>
               </View>
-            ))}
+              <View style={styles.dataItem}>
+                <Text style={styles.dataLabel}>Rx Voltage (mV)</Text>
+                <Text style={styles.dataValue}>
+                  {stationMeasurements[frequencyList[currentFrequencyIndex]]?.rxVoltage || "--"}
+                </Text>
+              </View>
+            </View>
+          </View>
+
+          <View style={styles.navigationControls}>
             <TouchableOpacity
-              style={styles.primaryButton}
-              onPress={saveStationMeasurements}
+              style={[styles.navButton, currentFrequencyIndex === 0 && styles.disabledButton]}
+              onPress={() => setCurrentFrequencyIndex(prev => prev - 1)}
+              disabled={currentFrequencyIndex === 0}
             >
-              <Text style={styles.buttonText}>Save Station Measurements</Text>
+              <Text style={styles.navButtonText}>Previous</Text>
             </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.secondaryButton}
-              onPress={saveResult}
-            >
-              <Text style={[styles.buttonText, { color: primaryColor }]}>
-                Save Project
-              </Text>
-            </TouchableOpacity>
+
+            {currentFrequencyIndex === frequencyList.length - 1 ? (
+              <TouchableOpacity
+                style={styles.primaryButton}
+                onPress={handleSaveStation}
+                disabled={!stationMeasurements[frequencyList[currentFrequencyIndex]]}
+              >
+                <Text style={styles.buttonText}>Complete Station</Text>
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity
+                style={[styles.navButton, !stationMeasurements[frequencyList[currentFrequencyIndex]] && styles.disabledButton]}
+                onPress={() => setCurrentFrequencyIndex(prev => prev + 1)}
+                disabled={!stationMeasurements[frequencyList[currentFrequencyIndex]]}
+              >
+                <Text style={styles.navButtonText}>Next</Text>
+              </TouchableOpacity>
+            )}
           </View>
         </Animatable.View>
       )}
@@ -506,96 +367,161 @@ export default function DataEntryScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 20, backgroundColor: "#fff" },
-  navbar: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 20,
+  container: {
+    flexGrow: 1,
+    backgroundColor: "#F9F9FB",
+    padding: 16,
   },
-  logo: { width: 40, height: 40, resizeMode: "contain" },
-  navTitle: {
+  header: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 24,
+  },
+  headerTitle: {
+    fontSize: 22,
     fontFamily: "JosefinSans_600SemiBold",
-    fontSize: 20,
     color: primaryColor,
   },
-  backButton: { padding: 10, alignSelf: "flex-start" },
-  sectionTitle: {
-    fontFamily: "JosefinSans_600SemiBold",
-    fontSize: 26,
-    color: "#2d3436",
-    marginVertical: 20,
-    textAlign: "center",
-  },
-  formCard: {
-    backgroundColor: "white",
-    borderRadius: 12,
-    padding: 20,
-    marginBottom: 20,
-    elevation: 2,
+  card: {
+    backgroundColor: "#FFF",
+    borderRadius: 16,
+    padding: 24,
+    marginBottom: 16,
     shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
+    shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.1,
-    shadowRadius: 4,
+    shadowRadius: 8,
+    elevation: 3,
   },
-  inputLabel: {
+  cardTitle: {
+    fontSize: 20,
     fontFamily: "JosefinSans_600SemiBold",
-    fontSize: 16,
-    color: "#2d3436",
+    color: "#2D3436",
+    textAlign: "center",
+    marginBottom: 24,
+  },
+  inputGroup: {
+    marginBottom: 20,
+  },
+  label: {
+    fontFamily: "JosefinSans_500Medium",
+    fontSize: 14,
+    color: "#6C63FF",
     marginBottom: 8,
-    marginTop: 15,
   },
   input: {
-    borderWidth: 1,
-    borderColor: "#ddd",
-    borderRadius: 8,
+    backgroundColor: "#F8F9FA",
+    borderRadius: 12,
     padding: 14,
     fontSize: 16,
-    backgroundColor: "#f8f9fa",
     fontFamily: "JosefinSans_400Regular",
+    borderWidth: 1,
+    borderColor: "#E9ECEF",
+  },
+  paramGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "space-between",
+    gap: 12,
+    marginBottom: 24,
+  },
+  paramItem: {
+    width: "48%",
   },
   primaryButton: {
     backgroundColor: primaryColor,
-    borderRadius: 8,
-    padding: 16,
-    marginTop: 25,
-    alignItems: "center",
-  },
-  secondaryButton: {
-    borderWidth: 2,
-    borderColor: primaryColor,
-    borderRadius: 8,
-    padding: 16,
-    marginTop: 15,
+    borderRadius: 12,
+    padding: 18,
     alignItems: "center",
   },
   buttonText: {
+    color: "#FFF",
     fontFamily: "JosefinSans_600SemiBold",
     fontSize: 16,
-    color: "white",
   },
-  measurementRow: {
+  progressHeader: {
     flexDirection: "row",
+    justifyContent: "space-between",
     alignItems: "center",
-    marginVertical: 10,
+    marginBottom: 32,
   },
   frequencyLabel: {
-    flex: 0.3,
+    fontFamily: "JosefinSans_600SemiBold",
+    fontSize: 24,
+    color: "#2D3436",
+  },
+  progressText: {
+    fontFamily: "JosefinSans_500Medium",
+    fontSize: 16,
+    color: primaryColor,
+  },
+  sensorContainer: {
+    marginBottom: 32,
+    alignItems: "center",
+  },
+  sensorButton: {
+    backgroundColor: primaryColor,
+    borderRadius: 100,
+    padding: 24,
+    width: "100%",
+    alignItems: "center",
+    justifyContent: "center",
+    flexDirection: "row",
+    gap: 12,
+    marginBottom: 24,
+  },
+  sensorLoading: {
+    backgroundColor: "#4A90E2",
+  },
+  sensorError: {
+    backgroundColor: "#FF6B6B",
+  },
+  sensorButtonText: {
+    color: "#FFF",
     fontFamily: "JosefinSans_600SemiBold",
     fontSize: 16,
-    color: "#2d3436",
   },
-  measurementInput: {
-    flex: 0.35,
-    borderWidth: 1,
-    borderColor: "#ddd",
-    borderRadius: 8,
-    padding: 10,
+  dataDisplay: {
+    flexDirection: "row",
+    gap: 16,
+    width: "100%",
+  },
+  dataItem: {
+    flex: 1,
+    backgroundColor: "#F8F9FA",
+    borderRadius: 12,
+    padding: 16,
+    alignItems: "center",
+  },
+  dataLabel: {
+    fontFamily: "JosefinSans_500Medium",
+    fontSize: 14,
+    color: "#6C63FF",
+    marginBottom: 8,
+  },
+  dataValue: {
+    fontFamily: "JosefinSans_600SemiBold",
+    fontSize: 18,
+    color: "#2D3436",
+  },
+  navigationControls: {
+    flexDirection: "row",
+    gap: 12,
+  },
+  navButton: {
+    flex: 1,
+    backgroundColor: "#E9ECEF",
+    borderRadius: 12,
+    padding: 18,
+    alignItems: "center",
+  },
+  navButtonText: {
+    color: primaryColor,
+    fontFamily: "JosefinSans_600SemiBold",
     fontSize: 16,
-    backgroundColor: "#f8f9fa",
-    marginHorizontal: 5,
-    fontFamily: "JosefinSans_400Regular",
   },
-});
-
-export { DataEntryScreen };
+  disabledButton: {
+    opacity: 0.5,
+  },
+}); 
