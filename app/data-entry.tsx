@@ -1,4 +1,3 @@
-// app/data-entry.jsx
 import React, { useState, useEffect } from "react";
 import {
   ScrollView,
@@ -16,6 +15,8 @@ import * as Animatable from "react-native-animatable";
 import { useRouter, useLocalSearchParams } from "expo-router";
 import * as Location from "expo-location";
 import { Audio } from "expo-av";
+import { WebView } from "react-native-webview";
+import { useRef } from "react";
 
 const beepSound = require("../assets/beep.mp3");
 const primaryColor = "#6C63FF";
@@ -51,7 +52,12 @@ export default function DataEntryScreen() {
   const router = useRouter();
   const params = useLocalSearchParams();
   const isEditing = params.isEditing === "true";
-  const projectIndex = params.projectIndex ? parseInt(params.projectIndex as string, 10) : null;
+  const projectIndex = params.projectIndex
+    ? parseInt(params.projectIndex as string, 10)
+    : null;
+
+  const webViewRef = useRef<WebView>(null);
+  const [webViewKey, setWebViewKey] = useState(0);
 
   // State management
   const [step, setStep] = useState(0);
@@ -69,17 +75,29 @@ export default function DataEntryScreen() {
   }>({});
   const [resultData, setResultData] = useState<ResultData>({
     name: "",
-    common: { transcat: "", interstation: "", averageResistivity: "", intercoil: "" },
+    common: {
+      transcat: "",
+      interstation: "",
+      averageResistivity: "",
+      intercoil: "",
+    },
     stations: {},
   });
-  const [sensorStatus, setSensorStatus] = useState<"idle" | "loading" | "error">("idle");
-  const [gps, setGps] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [sensorStatus, setSensorStatus] = useState<
+    "idle" | "loading" | "error"
+  >("idle");
+  const [gps, setGps] = useState<{
+    latitude: number;
+    longitude: number;
+  } | null>(null);
 
   // Load existing data for editing
   useEffect(() => {
     const loadExistingData = async () => {
       if (isEditing && params.existingData) {
-        const existingData: ResultData = JSON.parse(params.existingData as string);
+        const existingData: ResultData = JSON.parse(
+          params.existingData as string
+        );
         setResultName(existingData.name);
         setCommonParams(existingData.common);
         setResultData(existingData);
@@ -101,7 +119,19 @@ export default function DataEntryScreen() {
     })();
   }, []);
 
-  const calculateMeasurements = (freq: number, txCurrent: string, rxVoltage: string) => {
+  // Add this effect to send frequency updates to WebView
+  useEffect(() => {
+    const currentFreq = frequencyList[currentFrequencyIndex];
+    if (webViewRef.current) {
+      webViewRef.current.postMessage(currentFreq.toString());
+    }
+  }, [currentFrequencyIndex]);
+
+  const calculateMeasurements = (
+    freq: number,
+    txCurrent: string,
+    rxVoltage: string
+  ) => {
     const intercoilValue = parseFloat(commonParams.intercoil);
     const avgRes = parseFloat(commonParams.averageResistivity);
     const rxVoltage_mV = parseFloat(rxVoltage);
@@ -112,7 +142,9 @@ export default function DataEntryScreen() {
     const term1 = 2 * ht;
     const term2 = (0.00000232 * intercoilValue) / Math.pow(intercoilValue, 3);
     const numerator = term1 - term2;
-    const conductivity = ((numerator / 0.0000039478) * freq * Math.pow(intercoilValue, 2)) / 100000000;
+    const conductivity =
+      ((numerator / 0.0000039478) * freq * Math.pow(intercoilValue, 2)) /
+      100000000;
     const resistivity = (1 / conductivity) * 10000;
     const depth = -(503 / 5) * Math.sqrt(avgRes / freq);
 
@@ -130,30 +162,31 @@ export default function DataEntryScreen() {
     try {
       const response = await fetch("http://192.168.4.1/start");
       const data = await response.json();
-      
+
       const calculations = calculateMeasurements(
         frequencyList[currentFrequencyIndex],
         data.current.toFixed(2),
         (data.voltage * 1000).toFixed(2)
       );
 
-      setStationMeasurements(prev => ({
-              ...prev,
-              [frequencyList[currentFrequencyIndex]]: {
-                frequency: frequencyList[currentFrequencyIndex],
-                txCurrent: calculations.txCurrent,
-                rxVoltage: calculations.rxVoltage,
-                latitude: gps?.latitude?.toFixed(6) || "0.000000",
-                longitude: gps?.longitude?.toFixed(6) || "0.000000",
-                distance: (currentStation - (parseInt(commonParams.transcat, 10) * 100 + 1)) *
-                  parseFloat(commonParams.interstation),
-                calculatedDepth: calculations.depth,
-                calculatedConductivity: calculations.conductivity,
-                calculatedResistivity: calculations.resistivity,
-                date: new Date().toLocaleDateString(),
-                time: new Date().toLocaleTimeString(),
-              },
-            }));
+      setStationMeasurements((prev) => ({
+        ...prev,
+        [frequencyList[currentFrequencyIndex]]: {
+          frequency: frequencyList[currentFrequencyIndex],
+          txCurrent: calculations.txCurrent,
+          rxVoltage: calculations.rxVoltage,
+          latitude: gps?.latitude?.toFixed(6) || "0.000000",
+          longitude: gps?.longitude?.toFixed(6) || "0.000000",
+          distance:
+            (currentStation - (parseInt(commonParams.transcat, 10) * 100 + 1)) *
+            parseFloat(commonParams.interstation),
+          calculatedDepth: calculations.depth,
+          calculatedConductivity: calculations.conductivity,
+          calculatedResistivity: calculations.resistivity,
+          date: new Date().toLocaleDateString(),
+          time: new Date().toLocaleTimeString(),
+        },
+      }));
 
       await (await Audio.Sound.createAsync(beepSound)).sound.playAsync();
       setSensorStatus("idle");
@@ -178,7 +211,7 @@ export default function DataEntryScreen() {
     try {
       const storedResults = await AsyncStorage.getItem("results");
       const results = storedResults ? JSON.parse(storedResults) : [];
-      
+
       if (isEditing && typeof projectIndex === "number") {
         results[projectIndex] = updatedData;
       } else {
@@ -186,7 +219,7 @@ export default function DataEntryScreen() {
       }
 
       await AsyncStorage.setItem("results", JSON.stringify(results));
-      setCurrentStation(prev => prev + 1);
+      setCurrentStation((prev) => prev + 1);
       setCurrentFrequencyIndex(0);
       setStationMeasurements({});
       Alert.alert("Success", `Station ${currentStation} saved successfully`);
@@ -194,6 +227,61 @@ export default function DataEntryScreen() {
       Alert.alert("Error", "Failed to save station data");
     }
   };
+
+  const visualizationHTML = `
+<html>
+<head>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.39/Tone.min.js"></script>
+  <style>
+    body { margin: 0; background: #1a1a1a; }
+    canvas { width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+  <canvas id="visualizer"></canvas>
+  <script>
+    const canvas = document.getElementById('visualizer');
+    const ctx = canvas.getContext('2d');
+    let frequency = 813;
+    let phase = 0;
+
+    // Set canvas size
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = 200;
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    // Visualization loop
+    function animate() {
+      ctx.fillStyle = '#1a1a1a';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      
+      ctx.beginPath();
+      ctx.strokeStyle = '#6C63FF';
+      ctx.lineWidth = 2;
+      
+      for(let x = 0; x < canvas.width; x++) {
+        const y = canvas.height/2 + Math.sin(x * 0.02 + phase) * 
+          Math.sin(phase) * 40 * (frequency / 1000);
+        ctx.lineTo(x, y);
+      }
+      
+      ctx.stroke();
+      phase += 0.05 * (frequency / 1000);
+      requestAnimationFrame(animate);
+    }
+    animate();
+
+    // Handle frequency updates from React Native
+    window.addEventListener('message', (e) => {
+      frequency = parseFloat(e.data);
+    });
+  </script>
+</body>
+</html>
+`;
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
@@ -229,7 +317,9 @@ export default function DataEntryScreen() {
                 style={styles.input}
                 keyboardType="number-pad"
                 value={commonParams.transcat}
-                onChangeText={t => setCommonParams(p => ({ ...p, transcat: t }))}
+                onChangeText={(t) =>
+                  setCommonParams((p) => ({ ...p, transcat: t }))
+                }
               />
             </View>
 
@@ -239,7 +329,9 @@ export default function DataEntryScreen() {
                 style={styles.input}
                 keyboardType="decimal-pad"
                 value={commonParams.interstation}
-                onChangeText={t => setCommonParams(p => ({ ...p, interstation: t }))}
+                onChangeText={(t) =>
+                  setCommonParams((p) => ({ ...p, interstation: t }))
+                }
               />
             </View>
 
@@ -249,7 +341,9 @@ export default function DataEntryScreen() {
                 style={styles.input}
                 keyboardType="decimal-pad"
                 value={commonParams.averageResistivity}
-                onChangeText={t => setCommonParams(p => ({ ...p, averageResistivity: t }))}
+                onChangeText={(t) =>
+                  setCommonParams((p) => ({ ...p, averageResistivity: t }))
+                }
               />
             </View>
 
@@ -259,7 +353,9 @@ export default function DataEntryScreen() {
                 style={styles.input}
                 keyboardType="decimal-pad"
                 value={commonParams.intercoil}
-                onChangeText={t => setCommonParams(p => ({ ...p, intercoil: t }))}
+                onChangeText={(t) =>
+                  setCommonParams((p) => ({ ...p, intercoil: t }))
+                }
               />
             </View>
           </View>
@@ -267,9 +363,11 @@ export default function DataEntryScreen() {
           <TouchableOpacity
             style={styles.primaryButton}
             onPress={() => {
-              const isValid = Object.values(commonParams).every(v => !!v) && !!resultName;
+              const isValid =
+                Object.values(commonParams).every((v) => !!v) && !!resultName;
               if (isValid) {
-                const startStation = parseInt(commonParams.transcat, 10) * 100 + 1;
+                const startStation =
+                  parseInt(commonParams.transcat, 10) * 100 + 1;
                 setCurrentStation(startStation);
                 setStep(1);
               } else {
@@ -296,7 +394,7 @@ export default function DataEntryScreen() {
               style={[
                 styles.sensorButton,
                 sensorStatus === "loading" && styles.sensorLoading,
-                sensorStatus === "error" && styles.sensorError
+                sensorStatus === "error" && styles.sensorError,
               ]}
               onPress={handleFetchData}
               disabled={sensorStatus === "loading"}
@@ -311,7 +409,9 @@ export default function DataEntryScreen() {
                     color="#FFF"
                   />
                   <Text style={styles.sensorButtonText}>
-                    {sensorStatus === "error" ? "Retry Connection" : "Acquire Data"}
+                    {sensorStatus === "error"
+                      ? "Retry Connection"
+                      : "Acquire Data"}
                   </Text>
                 </>
               )}
@@ -321,22 +421,44 @@ export default function DataEntryScreen() {
               <View style={styles.dataItem}>
                 <Text style={styles.dataLabel}>Tx Current (A)</Text>
                 <Text style={styles.dataValue}>
-                  {stationMeasurements[frequencyList[currentFrequencyIndex]]?.txCurrent || "--"}
+                  {stationMeasurements[frequencyList[currentFrequencyIndex]]
+                    ?.txCurrent || "--"}
                 </Text>
               </View>
               <View style={styles.dataItem}>
                 <Text style={styles.dataLabel}>Rx Voltage (mV)</Text>
                 <Text style={styles.dataValue}>
-                  {stationMeasurements[frequencyList[currentFrequencyIndex]]?.rxVoltage || "--"}
+                  {stationMeasurements[frequencyList[currentFrequencyIndex]]
+                    ?.rxVoltage || "--"}
                 </Text>
               </View>
             </View>
           </View>
 
+          <View style={styles.visualizationContainer}>
+          <WebView
+            key={webViewKey}
+            ref={webViewRef}
+            originWhitelist={['*']}
+            source={{ html: visualizationHTML }}
+            style={styles.webview}
+            javaScriptEnabled={true}
+            onMessage={(event) => {}}
+            onLoadEnd={() => {
+              webViewRef.current?.postMessage(
+                frequencyList[currentFrequencyIndex].toString()
+              );
+            }}
+          />
+        </View>
+
           <View style={styles.navigationControls}>
             <TouchableOpacity
-              style={[styles.navButton, currentFrequencyIndex === 0 && styles.disabledButton]}
-              onPress={() => setCurrentFrequencyIndex(prev => prev - 1)}
+              style={[
+                styles.navButton,
+                currentFrequencyIndex === 0 && styles.disabledButton,
+              ]}
+              onPress={() => setCurrentFrequencyIndex((prev) => prev - 1)}
               disabled={currentFrequencyIndex === 0}
             >
               <Text style={styles.navButtonText}>Previous</Text>
@@ -346,15 +468,23 @@ export default function DataEntryScreen() {
               <TouchableOpacity
                 style={styles.primaryButton}
                 onPress={handleSaveStation}
-                disabled={!stationMeasurements[frequencyList[currentFrequencyIndex]]}
+                disabled={
+                  !stationMeasurements[frequencyList[currentFrequencyIndex]]
+                }
               >
                 <Text style={styles.buttonText}>Complete Station</Text>
               </TouchableOpacity>
             ) : (
               <TouchableOpacity
-                style={[styles.navButton, !stationMeasurements[frequencyList[currentFrequencyIndex]] && styles.disabledButton]}
-                onPress={() => setCurrentFrequencyIndex(prev => prev + 1)}
-                disabled={!stationMeasurements[frequencyList[currentFrequencyIndex]]}
+                style={[
+                  styles.navButton,
+                  !stationMeasurements[frequencyList[currentFrequencyIndex]] &&
+                    styles.disabledButton,
+                ]}
+                onPress={() => setCurrentFrequencyIndex((prev) => prev + 1)}
+                disabled={
+                  !stationMeasurements[frequencyList[currentFrequencyIndex]]
+                }
               >
                 <Text style={styles.navButtonText}>Next</Text>
               </TouchableOpacity>
@@ -524,4 +654,13 @@ const styles = StyleSheet.create({
   disabledButton: {
     opacity: 0.5,
   },
-}); 
+  visualizationContainer: {
+    height: 200,
+    borderRadius: 12,
+    overflow: "hidden",
+    marginVertical: 16,
+  },
+  webview: {
+    backgroundColor: "transparent",
+  },
+});
